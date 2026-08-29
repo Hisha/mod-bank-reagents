@@ -43,8 +43,15 @@ namespace
         std::chrono::steady_clock::time_point started;
     };
 
+    struct RemoteCraftRequest
+    {
+        uint32 spellId = 0;
+        uint32 remainingCrafts = 0;
+    };
+
     std::unordered_map<uint32, Authorization> g_authorizations;
     std::unordered_map<uint32, BorrowTransaction> g_transactions;
+    std::unordered_map<uint32, RemoteCraftRequest> g_remoteCrafts;
     // Presence in this set means the optional BankReagentsUI addon has completed
     // its server handshake during the current login session.  Remote crafting is
     // gated by this session marker so stock clients retain completely stock
@@ -390,13 +397,11 @@ std::string Manager::HandleAddonRequest(Player* player, std::string const& reque
     if (parts[0] == "HELLO")
     {
         g_addonSessions.insert(GuidLow(player));
-        LOG_INFO("module.bank-reagents", "BRG DEBUG HELLO guid={} remoteEnabled={} session=1", GuidLow(player), IsRemoteCraftEnabled() ? 1 : 0);
         return std::string("HELLO|1|") + (IsRemoteCraftEnabled() ? "1" : "0");
     }
 
     if (parts[0] == "SYNC")
     {
-        LOG_INFO("module.bank-reagents", "BRG DEBUG SYNC guid={} session=1", GuidLow(player));
         // A successful sync also proves that the optional addon is active for
         // this login session.  Refreshing this marker here makes opening the
         // profession window sufficient even if HELLO was missed during login.
@@ -416,6 +421,39 @@ std::string Manager::HandleAddonRequest(Player* player, std::string const& reque
             out << row.itemEntry << ':' << row.quantity;
         }
         return out.str();
+    }
+
+    if (parts[0] == "CRAFT")
+    {
+        uint32 spellId = parts.size() > 1 ? ParseUInt(parts[1]) : 0;
+        uint32 count = parts.size() > 2 ? ParseUInt(parts[2]) : 1;
+        uint32 guid = GuidLow(player);
+
+        if (!IsRemoteCraftEnabled() || g_addonSessions.find(guid) == g_addonSessions.end())
+            return "ERR|Remote crafting is not available for this client session.";
+
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
+        if (!info || !info->HasAttribute(SPELL_ATTR0_IS_TRADESKILL) || !player->HasSpell(spellId))
+            return "ERR|That recipe is not available to this character.";
+
+        count = std::max<uint32>(1, std::min<uint32>(count, 1000));
+
+        // Validate the first craft against the combined carried + virtual pool.
+        // Each subsequent craft is validated again by the normal spell check.
+        for (uint32 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+        {
+            if (info->Reagent[i] <= 0)
+                continue;
+
+            uint32 entry = uint32(info->Reagent[i]);
+            uint32 needed = info->ReagentCount[i];
+            uint64 combined = uint64(player->GetItemCount(entry, false)) + GetStored(player, entry);
+            if (combined < needed)
+                return "ERR|You do not have enough reagents in your bags and Reagent Storage.";
+        }
+
+        g_remoteCrafts[guid] = { spellId, count };
+        return "QUEUED|" + std::to_string(spellId) + "|" + std::to_string(count);
     }
 
     if (parts[0] == "ARM")
@@ -456,11 +494,6 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
     if (!hasSession)
         return false;
 
-    // Debug only addon-enabled player casts.  This avoids logging every
-    // Playerbot spell through the global AllSpellScript hook.
-    LOG_INFO("module.bank-reagents",
-        "BRG DEBUG CheckCast guid={} spell={} result={} session=1 tradeskill={} knowsSpell={}",
-        guid, spellId, uint32(result), isTradeSkill ? 1 : 0, knowsSpell ? 1 : 0);
 
     if (g_transactions.find(guid) != g_transactions.end())
         return true; // Same cast commonly receives more than one CheckCast pass.
@@ -481,9 +514,6 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
         uint32 required = info->ReagentCount[i];
         uint32 carried = player->GetItemCount(entry, false);
         uint64 stored = GetStored(player, entry);
-        LOG_INFO("module.bank-reagents",
-            "BRG DEBUG reagent spell={} entry={} required={} carried={} stored={} eligible={}",
-            spellId, entry, required, carried, stored, IsEligible(sObjectMgr->GetItemTemplate(entry)) ? 1 : 0);
         if (carried >= required)
             continue;
 
@@ -494,13 +524,11 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
         uint32 missing = required - carried;
         if (stored < missing)
         {
-            LOG_INFO("module.bank-reagents", "BRG DEBUG insufficient virtual entry={} missing={} stored={}", entry, missing, stored);
             continue; // Stock reagent failure will be returned later.
         }
 
         ItemPosCountVec dest;
         InventoryResult inv = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry, missing);
-        LOG_INFO("module.bank-reagents", "BRG DEBUG CanStore entry={} missing={} result={} destParts={}", entry, missing, uint32(inv), dest.size());
         if (inv != EQUIP_ERR_OK)
         {
             for (BorrowedReagent const& borrowed : txn.reagents)
@@ -520,8 +548,6 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
             continue;
 
         Item* storedItem = player->StoreNewItem(dest, entry, true);
-        LOG_INFO("module.bank-reagents", "BRG DEBUG StoreNewItem entry={} missing={} success={} carriedAfter={}",
-            entry, missing, storedItem ? 1 : 0, player->GetItemCount(entry, false));
         if (!storedItem)
         {
             AddStored(player, entry, missing);
@@ -615,26 +641,76 @@ void Manager::OnPlayerUpdate(Player* player)
 {
     if (!player)
         return;
-    uint32 guid = GuidLow(player);
-    auto txn = g_transactions.find(guid);
-    if (txn == g_transactions.end())
-        return;
 
-    uint32 timeout = std::max<uint32>(5, sConfigMgr->GetOption<uint32>("BankReagents.RemoteCraft.TransactionTimeoutSeconds", 30));
-    auto age = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - txn->second.started).count();
-    if (age >= timeout)
+    uint32 guid = GuidLow(player);
+
+    // First maintain/rollback an existing borrowed-reagent transaction.
+    auto txn = g_transactions.find(guid);
+    if (txn != g_transactions.end())
     {
-        RollbackBorrow(player, "transaction timeout");
-        ClearAuthorization(player);
+        uint32 timeout = std::max<uint32>(5, sConfigMgr->GetOption<uint32>("BankReagents.RemoteCraft.TransactionTimeoutSeconds", 30));
+        auto age = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - txn->second.started).count();
+        if (age >= timeout)
+        {
+            RollbackBorrow(player, "transaction timeout");
+            ClearAuthorization(player);
+            g_remoteCrafts.erase(guid);
+            return;
+        }
+
+        // If a failed CheckCast has already removed the spell from the current-spell slots,
+        // roll the borrowed material back promptly rather than waiting for the timeout.
+        if (age >= 1 && !player->FindCurrentSpellBySpellId(txn->second.spellId))
+        {
+            RollbackBorrow(player, "spell no longer active");
+            ClearAuthorization(player);
+            g_remoteCrafts.erase(guid);
+        }
         return;
     }
 
-    // If a failed CheckCast has already removed the spell from the current-spell slots,
-    // roll the borrowed material back promptly rather than waiting for the timeout.
-    if (age >= 1 && !player->FindCurrentSpellBySpellId(txn->second.spellId))
+    // A virtual-reagent craft cannot use DoTradeSkill() because the stock 3.3.5 client
+    // rejects the cast locally before sending a packet when its physical bag count is low.
+    // The addon therefore queues the learned recipe here and the server starts the same
+    // non-triggered trade-skill spell.  From this point onward normal AzerothCore spell
+    // validation, reagent consumption, effects, skillups and procs remain in control.
+    auto request = g_remoteCrafts.find(guid);
+    if (request == g_remoteCrafts.end())
+        return;
+
+    if (!request->second.remainingCrafts)
     {
-        RollbackBorrow(player, "spell no longer active");
-        ClearAuthorization(player);
+        g_remoteCrafts.erase(request);
+        return;
+    }
+
+    if (player->IsNonMeleeSpellCast(false))
+        return;
+
+    uint32 spellId = request->second.spellId;
+    SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
+    if (!info || !info->HasAttribute(SPELL_ATTR0_IS_TRADESKILL) || !player->HasSpell(spellId))
+    {
+        g_remoteCrafts.erase(request);
+        return;
+    }
+
+    SpellCastResult castResult = player->CastSpell(player, spellId, false);
+    if (castResult != SPELL_CAST_OK)
+    {
+        // The normal spell system has already supplied any appropriate client error.
+        // If BeginBorrow emitted our bag-space explanation it used DONT_REPORT.
+        g_remoteCrafts.erase(guid);
+        return;
+    }
+
+    auto active = g_remoteCrafts.find(guid);
+    if (active != g_remoteCrafts.end())
+    {
+        if (active->second.remainingCrafts > 0)
+            --active->second.remainingCrafts;
+        if (!active->second.remainingCrafts)
+            g_remoteCrafts.erase(active);
     }
 }
 
@@ -645,6 +721,7 @@ void Manager::OnPlayerLogout(Player* player)
     RollbackBorrow(player, "logout");
     ClearAuthorization(player);
     g_addonSessions.erase(GuidLow(player));
+    g_remoteCrafts.erase(GuidLow(player));
 }
 
 bool Manager::IsBorrowedItem(Player* player, uint32 itemEntry) const
