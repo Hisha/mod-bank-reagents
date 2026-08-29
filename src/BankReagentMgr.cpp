@@ -6,6 +6,7 @@
 #include "DatabaseEnv.h"
 #include "Item.h"
 #include "ItemTemplate.h"
+#include "Log.h"
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "Spell.h"
@@ -389,11 +390,13 @@ std::string Manager::HandleAddonRequest(Player* player, std::string const& reque
     if (parts[0] == "HELLO")
     {
         g_addonSessions.insert(GuidLow(player));
+        LOG_INFO("module.bank-reagents", "BRG DEBUG HELLO guid={} remoteEnabled={} session=1", GuidLow(player), IsRemoteCraftEnabled() ? 1 : 0);
         return std::string("HELLO|1|") + (IsRemoteCraftEnabled() ? "1" : "0");
     }
 
     if (parts[0] == "SYNC")
     {
+        LOG_INFO("module.bank-reagents", "BRG DEBUG SYNC guid={} session=1", GuidLow(player));
         // A successful sync also proves that the optional addon is active for
         // this login session.  Refreshing this marker here makes opening the
         // profession window sufficient even if HELLO was missed during login.
@@ -442,18 +445,24 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
 
     uint32 guid = GuidLow(player);
     uint32 spellId = spell->GetSpellInfo()->Id;
+    SpellInfo const* info = spell->GetSpellInfo();
+    bool hasSession = g_addonSessions.find(guid) != g_addonSessions.end();
+    bool isTradeSkill = info && info->HasAttribute(SPELL_ATTR0_IS_TRADESKILL);
+    bool knowsSpell = player->HasSpell(spellId);
+    LOG_INFO("module.bank-reagents",
+        "BRG DEBUG CheckCast guid={} spell={} result={} session={} tradeskill={} knowsSpell={}",
+        guid, spellId, uint32(result), hasSession ? 1 : 0, isTradeSkill ? 1 : 0, knowsSpell ? 1 : 0);
     // Remote crafting is available only to a client that completed the
     // BankReagentsUI handshake during this login session.  This deliberately
     // avoids depending on an addon-message packet arriving immediately before
     // the protected DoTradeSkill packet.
-    if (g_addonSessions.find(guid) == g_addonSessions.end())
+    if (!hasSession)
         return false;
 
     if (g_transactions.find(guid) != g_transactions.end())
         return true; // Same cast commonly receives more than one CheckCast pass.
 
-    SpellInfo const* info = spell->GetSpellInfo();
-    if (!info->HasAttribute(SPELL_ATTR0_IS_TRADESKILL) || !player->HasSpell(spellId))
+    if (!isTradeSkill || !knowsSpell)
         return false;
 
     BorrowTransaction txn;
@@ -468,6 +477,10 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
         uint32 entry = info->Reagent[i];
         uint32 required = info->ReagentCount[i];
         uint32 carried = player->GetItemCount(entry, false);
+        uint64 stored = GetStored(player, entry);
+        LOG_INFO("module.bank-reagents",
+            "BRG DEBUG reagent spell={} entry={} required={} carried={} stored={} eligible={}",
+            spellId, entry, required, carried, stored, IsEligible(sObjectMgr->GetItemTemplate(entry)) ? 1 : 0);
         if (carried >= required)
             continue;
 
@@ -476,11 +489,15 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
             continue; // Stock WoW handles non-storage reagents normally.
 
         uint32 missing = required - carried;
-        if (GetStored(player, entry) < missing)
+        if (stored < missing)
+        {
+            LOG_INFO("module.bank-reagents", "BRG DEBUG insufficient virtual entry={} missing={} stored={}", entry, missing, stored);
             continue; // Stock reagent failure will be returned later.
+        }
 
         ItemPosCountVec dest;
         InventoryResult inv = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry, missing);
+        LOG_INFO("module.bank-reagents", "BRG DEBUG CanStore entry={} missing={} result={} destParts={}", entry, missing, uint32(inv), dest.size());
         if (inv != EQUIP_ERR_OK)
         {
             for (BorrowedReagent const& borrowed : txn.reagents)
@@ -500,6 +517,8 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
             continue;
 
         Item* storedItem = player->StoreNewItem(dest, entry, true);
+        LOG_INFO("module.bank-reagents", "BRG DEBUG StoreNewItem entry={} missing={} success={} carriedAfter={}",
+            entry, missing, storedItem ? 1 : 0, player->GetItemCount(entry, false));
         if (!storedItem)
         {
             AddStored(player, entry, missing);
