@@ -12,6 +12,7 @@
 #include "Spell.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "WorldSession.h"
 
 #include <algorithm>
 #include <chrono>
@@ -421,6 +422,33 @@ std::string Manager::HandleAddonRequest(Player* player, std::string const& reque
             out << row.itemEntry << ':' << row.quantity;
         }
         return out.str();
+    }
+
+    if (parts[0] == "WITHDRAW")
+    {
+        uint32 itemEntry = parts.size() > 1 ? ParseUInt(parts[1]) : 0;
+        uint32 amount = parts.size() > 2 ? ParseUInt(parts[2]) : 0;
+
+        // Addon withdrawals are deliberately bank-only.  The client UI is only
+        // a convenience layer; never allow it to turn virtual reagent storage
+        // into an anywhere/anytime inventory source.  CanUseBank() validates the
+        // current banker GUID and interaction distance using AzerothCore's normal
+        // bank-session rules.
+        if (!player->GetSession() || !player->GetSession()->CanUseBank())
+            return "ERR|Reagent withdrawals are only available while using a banker.";
+
+        if (!itemEntry || !amount)
+            return "ERR|Invalid reagent withdrawal request.";
+
+        uint64 stored = GetStored(player, itemEntry);
+        if (!stored)
+            return "ERR|That reagent is no longer in storage.";
+
+        amount = uint32(std::min<uint64>(stored, amount));
+        if (!Withdraw(player, itemEntry, amount))
+            return "ERR|Unable to withdraw that reagent. Check your bag space.";
+
+        return "WITHDRAWN|" + std::to_string(itemEntry) + "|" + std::to_string(amount);
     }
 
     if (parts[0] == "CRAFT")
