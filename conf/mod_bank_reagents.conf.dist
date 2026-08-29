@@ -1,0 +1,7 @@
+[worldserver]
+
+BankReagents.Enable = 1
+BankReagents.AutoDeposit.Enable = 1
+BankReagents.RemoteCraft.Enable = 1
+BankReagents.RemoteCraft.AuthorizationSeconds = 5
+BankReagents.RemoteCraft.TransactionTimeoutSeconds = 30
