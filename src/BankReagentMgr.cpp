@@ -17,18 +17,10 @@
 #include <cstdlib>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace
 {
-    constexpr uint32 ReagentBagMask =
-        BAG_FAMILY_MASK_LEATHERWORKING_SUPP |
-        BAG_FAMILY_MASK_INSCRIPTION_SUPP |
-        BAG_FAMILY_MASK_HERBS |
-        BAG_FAMILY_MASK_ENCHANTING_SUPP |
-        BAG_FAMILY_MASK_ENGINEERING_SUPP |
-        BAG_FAMILY_MASK_GEMS |
-        BAG_FAMILY_MASK_MINING_SUPP;
-
     struct BorrowedReagent
     {
         uint32 itemEntry = 0;
@@ -98,7 +90,34 @@ bool Manager::IsRemoteCraftEnabled() const
 
 bool Manager::IsEligible(ItemTemplate const* proto) const
 {
-    return proto && (proto->BagFamily & ReagentBagMask) != 0;
+    if (!proto)
+        return false;
+
+    // WotLK profession-specific bag-family flags are broader than "crafting reagent".
+    // They also include things such as profession tools and recipe patterns.  Instead,
+    // build the storage whitelist from the reagents actually consumed by trade-skill
+    // spells.  This includes unusual cooking/vendor ingredients while excluding tools,
+    // patterns/formulas, and other profession-related items that are not consumed.
+    static std::unordered_set<uint32> reagentEntries;
+    static bool initialized = false;
+
+    if (!initialized)
+    {
+        for (uint32 spellId = 1; spellId < sSpellMgr->GetSpellInfoStoreSize(); ++spellId)
+        {
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
+            if (!info || !info->HasAttribute(SPELL_ATTR0_IS_TRADESKILL))
+                continue;
+
+            for (uint32 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+                if (info->Reagent[i] > 0 && info->ReagentCount[i] > 0)
+                    reagentEntries.insert(uint32(info->Reagent[i]));
+        }
+
+        initialized = true;
+    }
+
+    return reagentEntries.find(proto->ItemId) != reagentEntries.end();
 }
 
 bool Manager::IsAutoDepositEnabled(Player* player) const
@@ -201,33 +220,49 @@ uint32 Manager::DepositAll(Player* player) const
     if (!IsEnabled() || !player || !sConfigMgr->GetOption<bool>("BankReagents.AutoDeposit.Enable", true))
         return 0;
 
-    std::unordered_map<uint32, uint32> counts;
-    auto inspect = [&](Item* item)
+    struct DepositCandidate
+    {
+        uint8 bag = 0;
+        uint8 slot = 0;
+        uint32 entry = 0;
+        uint32 count = 0;
+    };
+
+    std::vector<DepositCandidate> candidates;
+
+    auto inspect = [&](uint8 bag, uint8 slot, Item* item)
     {
         if (item && IsEligible(item->GetTemplate()))
-            counts[item->GetEntry()] += item->GetCount();
+            candidates.push_back({ bag, slot, item->GetEntry(), item->GetCount() });
     };
 
     for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
-        inspect(player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot));
+        inspect(INVENTORY_SLOT_BAG_0, slot, player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot));
 
     for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
         if (Bag* bag = player->GetBagByPos(bagSlot))
             for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
-                inspect(bag->GetItemByPos(slot));
+                inspect(bagSlot, uint8(slot), bag->GetItemByPos(slot));
 
     uint32 total = 0;
-    for (auto const& pair : counts)
+    for (DepositCandidate const& candidate : candidates)
     {
-        uint32 entry = pair.first;
-        uint32 count = pair.second;
-        if (!count)
+        // Re-read the slot before touching it. DepositAll is synchronous, but this keeps
+        // the operation safe if another script moved an item while handling removal hooks.
+        Item* item = player->GetItemByPos(candidate.bag, candidate.slot);
+        if (!item || item->GetEntry() != candidate.entry || item->GetCount() != candidate.count ||
+            !IsEligible(item->GetTemplate()))
             continue;
 
-        AddStored(player, entry, count);
-        player->DestroyItemCount(entry, count, false);
-        total += count;
+        // DestroyItem(..., true) is important. With update=false an Item can remain marked
+        // as "in world" after being detached, which later trips Object::~Object's
+        // "deleted but still in world" assertion. We deposit whole stacks, so remove the
+        // exact physical stack rather than aggregating by entry and calling DestroyItemCount.
+        player->DestroyItem(candidate.bag, candidate.slot, true);
+        AddStored(player, candidate.entry, candidate.count);
+        total += candidate.count;
     }
+
     return total;
 }
 
@@ -407,7 +442,7 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
             {
                 uint32 now = player->GetItemCount(borrowed.itemEntry, false);
                 if (now > borrowed.baselineCarried)
-                    player->DestroyItemCount(borrowed.itemEntry, std::min(borrowed.borrowed, now - borrowed.baselineCarried), false);
+                    player->DestroyItemCount(borrowed.itemEntry, std::min(borrowed.borrowed, now - borrowed.baselineCarried), true);
                 AddStored(player, borrowed.itemEntry, borrowed.borrowed);
             }
             ChatHandler(player->GetSession()).SendSysMessage(
@@ -427,7 +462,7 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
             {
                 uint32 now = player->GetItemCount(borrowed.itemEntry, false);
                 if (now > borrowed.baselineCarried)
-                    player->DestroyItemCount(borrowed.itemEntry, std::min(borrowed.borrowed, now - borrowed.baselineCarried), false);
+                    player->DestroyItemCount(borrowed.itemEntry, std::min(borrowed.borrowed, now - borrowed.baselineCarried), true);
                 AddStored(player, borrowed.itemEntry, borrowed.borrowed);
             }
             result = SPELL_FAILED_DONT_REPORT;
@@ -481,7 +516,7 @@ void Manager::RollbackBorrow(Player* player, char const* /*reason*/)
     {
         uint32 now = player->GetItemCount(borrowed.itemEntry, false);
         if (now > borrowed.baselineCarried)
-            player->DestroyItemCount(borrowed.itemEntry, std::min(borrowed.borrowed, now - borrowed.baselineCarried), false);
+            player->DestroyItemCount(borrowed.itemEntry, std::min(borrowed.borrowed, now - borrowed.baselineCarried), true);
         AddStored(player, borrowed.itemEntry, borrowed.borrowed);
     }
     g_transactions.erase(txn);
