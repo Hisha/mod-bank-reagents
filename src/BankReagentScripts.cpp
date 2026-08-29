@@ -97,6 +97,8 @@ namespace
             if (!sBankReagents.IsEnabled() || !IsBanker(creature))
                 return false;
 
+            sBankReagents.NoteBanker(player, creature);
+
             if (sBankReagents.IsAutoDepositEnabled(player))
             {
                 uint32 deposited = sBankReagents.DepositAll(player);
@@ -111,6 +113,8 @@ namespace
         {
             if (!sBankReagents.IsEnabled() || !IsBanker(creature) || sender != Sender)
                 return false;
+
+            sBankReagents.NoteBanker(player, creature);
 
             if (action == ActionToggle)
             {

@@ -2,12 +2,14 @@
 
 #include "Bag.h"
 #include "Chat.h"
+#include "Creature.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "Item.h"
 #include "ItemTemplate.h"
 #include "Log.h"
 #include "ObjectMgr.h"
+#include "ObjectGuid.h"
 #include "Player.h"
 #include "Spell.h"
 #include "SpellInfo.h"
@@ -58,6 +60,9 @@ namespace
     // gated by this session marker so stock clients retain completely stock
     // crafting behavior without relying on per-click packet ordering.
     std::unordered_set<uint32> g_addonSessions;
+    // The GUID is captured from the module's banker gossip hook. It is never
+    // trusted by itself; every withdrawal revalidates normal NPC interaction.
+    std::unordered_map<uint32, ObjectGuid> g_bankerGuids;
 
     uint32 GuidLow(Player* player)
     {
@@ -386,6 +391,26 @@ bool Manager::ArmRemoteCraft(Player* player, uint32 spellId, uint32 count, std::
     return true;
 }
 
+void Manager::NoteBanker(Player* player, Creature* banker)
+{
+    if (!player || !banker || !(banker->GetNpcFlags() & UNIT_NPC_FLAG_BANKER))
+        return;
+
+    g_bankerGuids[GuidLow(player)] = banker->GetGUID();
+}
+
+bool Manager::CanAddonWithdraw(Player* player) const
+{
+    if (!player)
+        return false;
+
+    auto itr = g_bankerGuids.find(GuidLow(player));
+    if (itr == g_bankerGuids.end())
+        return false;
+
+    return player->GetNPCIfCanInteractWith(itr->second, UNIT_NPC_FLAG_BANKER) != nullptr;
+}
+
 std::string Manager::HandleAddonRequest(Player* player, std::string const& request)
 {
     if (!IsEnabled() || !player)
@@ -429,12 +454,9 @@ std::string Manager::HandleAddonRequest(Player* player, std::string const& reque
         uint32 itemEntry = parts.size() > 1 ? ParseUInt(parts[1]) : 0;
         uint32 amount = parts.size() > 2 ? ParseUInt(parts[2]) : 0;
 
-        // Addon withdrawals are deliberately bank-only.  The client UI is only
-        // a convenience layer; never allow it to turn virtual reagent storage
-        // into an anywhere/anytime inventory source.  CanUseBank() validates the
-        // current banker GUID and interaction distance using AzerothCore's normal
-        // bank-session rules.
-        if (!player->GetSession() || !player->GetSession()->CanUseBank())
+        // WorldSession::CanUseBank() is private on this AzerothCore branch.
+        // Revalidate the banker captured by our public gossip hook instead.
+        if (!CanAddonWithdraw(player))
             return "ERR|Reagent withdrawals are only available while using a banker.";
 
         if (!itemEntry || !amount)
@@ -749,6 +771,7 @@ void Manager::OnPlayerLogout(Player* player)
     RollbackBorrow(player, "logout");
     ClearAuthorization(player);
     g_addonSessions.erase(GuidLow(player));
+    g_bankerGuids.erase(GuidLow(player));
     g_remoteCrafts.erase(GuidLow(player));
 }
 

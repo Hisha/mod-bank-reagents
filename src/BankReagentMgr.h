@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+class Creature;
 class ItemTemplate;
 class Player;
 class Spell;
@@ -39,6 +40,10 @@ namespace BankReagents
 
         uint32 DepositAll(Player* player) const;
         bool Withdraw(Player* player, uint32 itemEntry, uint32 amount) const;
+
+        // Record/revalidate the banker used by addon-originated withdrawals.
+        void NoteBanker(Player* player, Creature* banker);
+        bool CanAddonWithdraw(Player* player) const;
 
         // Addon protocol. Input excludes the "BRG\t" prefix.
         std::string HandleAddonRequest(Player* player, std::string const& request);
