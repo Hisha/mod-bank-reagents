@@ -411,6 +411,11 @@ bool Manager::CanAddonWithdraw(Player* player) const
     return player->GetNPCIfCanInteractWith(itr->second, UNIT_NPC_FLAG_BANKER) != nullptr;
 }
 
+bool Manager::HasAddonSession(Player* player) const
+{
+    return player && g_addonSessions.find(GuidLow(player)) != g_addonSessions.end();
+}
+
 std::string Manager::HandleAddonRequest(Player* player, std::string const& request)
 {
     if (!IsEnabled() || !player)

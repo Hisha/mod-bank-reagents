@@ -44,6 +44,7 @@ namespace BankReagents
         // Record/revalidate the banker used by addon-originated withdrawals.
         void NoteBanker(Player* player, Creature* banker);
         bool CanAddonWithdraw(Player* player) const;
+        bool HasAddonSession(Player* player) const;
 
         // Addon protocol. Input excludes the "BRG\t" prefix.
         std::string HandleAddonRequest(Player* player, std::string const& request);

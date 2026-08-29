@@ -13,6 +13,7 @@
 #include "ScriptedGossip.h"
 #include "Spell.h"
 #include "SpellInfo.h"
+#include "WorldSession.h"
 
 #include <algorithm>
 #include <string>
@@ -105,6 +106,18 @@ namespace
                 if (deposited)
                     ChatHandler(player->GetSession()).PSendSysMessage("Deposited {} crafting reagents into Reagent Storage.", deposited);
             }
+
+            // Addon clients use the graphical bank/reagent-storage interface.
+            // Send the same bank-open packet the native banker gossip action uses,
+            // so BANKFRAME_OPENED still drives the client UI and bank access remains
+            // a normal server-authorized banker session.  Clients without the addon
+            // keep the original gossip-based reagent storage fallback below.
+            if (sBankReagents.HasAddonSession(player))
+            {
+                player->GetSession()->SendShowBank(creature->GetGUID());
+                return true;
+            }
+
             SendBankerMenu(player, creature);
             return true;
         }
