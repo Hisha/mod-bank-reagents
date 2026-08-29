@@ -449,15 +449,18 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
     bool hasSession = g_addonSessions.find(guid) != g_addonSessions.end();
     bool isTradeSkill = info && info->HasAttribute(SPELL_ATTR0_IS_TRADESKILL);
     bool knowsSpell = player->HasSpell(spellId);
-    LOG_INFO("module.bank-reagents",
-        "BRG DEBUG CheckCast guid={} spell={} result={} session={} tradeskill={} knowsSpell={}",
-        guid, spellId, uint32(result), hasSession ? 1 : 0, isTradeSkill ? 1 : 0, knowsSpell ? 1 : 0);
     // Remote crafting is available only to a client that completed the
     // BankReagentsUI handshake during this login session.  This deliberately
     // avoids depending on an addon-message packet arriving immediately before
     // the protected DoTradeSkill packet.
     if (!hasSession)
         return false;
+
+    // Debug only addon-enabled player casts.  This avoids logging every
+    // Playerbot spell through the global AllSpellScript hook.
+    LOG_INFO("module.bank-reagents",
+        "BRG DEBUG CheckCast guid={} spell={} result={} session=1 tradeskill={} knowsSpell={}",
+        guid, spellId, uint32(result), isTradeSkill ? 1 : 0, knowsSpell ? 1 : 0);
 
     if (g_transactions.find(guid) != g_transactions.end())
         return true; // Same cast commonly receives more than one CheckCast pass.
