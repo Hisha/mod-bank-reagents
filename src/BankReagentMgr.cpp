@@ -43,7 +43,7 @@ namespace
         std::chrono::steady_clock::time_point expires;
     };
 
-    struct Transaction
+    struct BorrowTransaction
     {
         uint32 spellId = 0;
         std::vector<BorrowedReagent> reagents;
@@ -51,7 +51,7 @@ namespace
     };
 
     std::unordered_map<uint32, Authorization> g_authorizations;
-    std::unordered_map<uint32, Transaction> g_transactions;
+    std::unordered_map<uint32, BorrowTransaction> g_transactions;
 
     uint32 GuidLow(Player* player)
     {
@@ -376,7 +376,7 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
     if (!info->HasAttribute(SPELL_ATTR0_IS_TRADESKILL))
         return false;
 
-    Transaction txn;
+    BorrowTransaction txn;
     txn.spellId = spellId;
     txn.started = std::chrono::steady_clock::now();
 
@@ -412,7 +412,7 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
             }
             ChatHandler(player->GetSession()).SendSysMessage(
                 "You have enough reagents in Reagent Storage, but need additional bag space to use them for crafting.");
-            result = SPELL_FAILED_INVENTORY_FULL;
+            result = SPELL_FAILED_DONT_REPORT;
             return false;
         }
 
@@ -430,7 +430,7 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
                     player->DestroyItemCount(borrowed.itemEntry, std::min(borrowed.borrowed, now - borrowed.baselineCarried), false);
                 AddStored(player, borrowed.itemEntry, borrowed.borrowed);
             }
-            result = SPELL_FAILED_INVENTORY_FULL;
+            result = SPELL_FAILED_DONT_REPORT;
             return false;
         }
 
