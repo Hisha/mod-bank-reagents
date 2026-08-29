@@ -454,6 +454,22 @@ std::string Manager::HandleAddonRequest(Player* player, std::string const& reque
         return out.str();
     }
 
+    if (parts[0] == "AUTO")
+    {
+        // Querying the preference is harmless, but changing it is deliberately
+        // bank-only just like the original banker gossip option.
+        if (parts.size() == 1)
+            return std::string("AUTO|") + (IsAutoDepositEnabled(player) ? "1" : "0") + "|0";
+
+        if (!CanAddonWithdraw(player))
+            return "ERR|Auto reagent deposit can only be changed while using a banker.";
+
+        bool enabled = ParseUInt(parts[1]) != 0;
+        SetAutoDeposit(player, enabled);
+        uint32 deposited = enabled ? DepositAll(player) : 0;
+        return std::string("AUTO|") + (enabled ? "1" : "0") + "|" + std::to_string(deposited);
+    }
+
     if (parts[0] == "WITHDRAW")
     {
         uint32 itemEntry = parts.size() > 1 ? ParseUInt(parts[1]) : 0;
