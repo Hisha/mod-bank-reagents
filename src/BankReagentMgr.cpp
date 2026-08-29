@@ -44,6 +44,11 @@ namespace
 
     std::unordered_map<uint32, Authorization> g_authorizations;
     std::unordered_map<uint32, BorrowTransaction> g_transactions;
+    // Presence in this set means the optional BankReagentsUI addon has completed
+    // its server handshake during the current login session.  Remote crafting is
+    // gated by this session marker so stock clients retain completely stock
+    // crafting behavior without relying on per-click packet ordering.
+    std::unordered_set<uint32> g_addonSessions;
 
     uint32 GuidLow(Player* player)
     {
@@ -382,10 +387,17 @@ std::string Manager::HandleAddonRequest(Player* player, std::string const& reque
         return "ERR|bad-request";
 
     if (parts[0] == "HELLO")
+    {
+        g_addonSessions.insert(GuidLow(player));
         return std::string("HELLO|1|") + (IsRemoteCraftEnabled() ? "1" : "0");
+    }
 
     if (parts[0] == "SYNC")
     {
+        // A successful sync also proves that the optional addon is active for
+        // this login session.  Refreshing this marker here makes opening the
+        // profession window sufficient even if HELLO was missed during login.
+        g_addonSessions.insert(GuidLow(player));
         uint32 offset = parts.size() > 1 ? ParseUInt(parts[1]) : 0;
         constexpr uint32 pageSize = 12;
         auto rows = List(player, offset, pageSize);
@@ -430,21 +442,18 @@ bool Manager::BeginBorrow(Player* player, Spell* spell, SpellCastResult& result)
 
     uint32 guid = GuidLow(player);
     uint32 spellId = spell->GetSpellInfo()->Id;
-    auto authItr = g_authorizations.find(guid);
-    if (authItr == g_authorizations.end() || authItr->second.spellId != spellId || authItr->second.remainingCrafts == 0)
+    // Remote crafting is available only to a client that completed the
+    // BankReagentsUI handshake during this login session.  This deliberately
+    // avoids depending on an addon-message packet arriving immediately before
+    // the protected DoTradeSkill packet.
+    if (g_addonSessions.find(guid) == g_addonSessions.end())
         return false;
-
-    if (std::chrono::steady_clock::now() > authItr->second.expires)
-    {
-        g_authorizations.erase(authItr);
-        return false;
-    }
 
     if (g_transactions.find(guid) != g_transactions.end())
         return true; // Same cast commonly receives more than one CheckCast pass.
 
     SpellInfo const* info = spell->GetSpellInfo();
-    if (!info->HasAttribute(SPELL_ATTR0_IS_TRADESKILL))
+    if (!info->HasAttribute(SPELL_ATTR0_IS_TRADESKILL) || !player->HasSpell(spellId))
         return false;
 
     BorrowTransaction txn;
@@ -526,17 +535,6 @@ void Manager::CommitBorrow(Player* player, uint32 spellId)
     if (txn != g_transactions.end() && txn->second.spellId == spellId)
         g_transactions.erase(txn);
 
-    auto auth = g_authorizations.find(guid);
-    if (auth != g_authorizations.end() && auth->second.spellId == spellId)
-    {
-        if (auth->second.remainingCrafts > 0)
-            --auth->second.remainingCrafts;
-        if (auth->second.remainingCrafts == 0)
-            g_authorizations.erase(auth);
-        else
-            auth->second.expires = std::chrono::steady_clock::now() + std::chrono::seconds(
-                std::max<uint32>(1, sConfigMgr->GetOption<uint32>("BankReagents.RemoteCraft.AuthorizationSeconds", 5)));
-    }
 }
 
 void Manager::RollbackBorrow(Player* player, char const* /*reason*/)
@@ -620,8 +618,11 @@ void Manager::OnPlayerUpdate(Player* player)
 
 void Manager::OnPlayerLogout(Player* player)
 {
+    if (!player)
+        return;
     RollbackBorrow(player, "logout");
     ClearAuthorization(player);
+    g_addonSessions.erase(GuidLow(player));
 }
 
 bool Manager::IsBorrowedItem(Player* player, uint32 itemEntry) const
