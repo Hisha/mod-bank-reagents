@@ -117,7 +117,32 @@ bool Manager::IsEligible(ItemTemplate const* proto) const
         initialized = true;
     }
 
-    return reagentEntries.find(proto->ItemId) != reagentEntries.end();
+    if (reagentEntries.find(proto->ItemId) == reagentEntries.end())
+        return false;
+
+    // Some trade-skill recipes consume objects that are clearly not reagents in the
+    // reagent-bank sense (for example a Skinning Knife used as a component of another
+    // profession item, or a learnable recipe/pattern).  Keep the spell-derived whitelist
+    // as the primary test, but reject item classes that represent equipment, recipes,
+    // quest objects, keys, containers, ammunition, etc.
+    switch (proto->Class)
+    {
+        case ITEM_CLASS_CONTAINER:
+        case ITEM_CLASS_WEAPON:
+        case ITEM_CLASS_ARMOR:
+        case ITEM_CLASS_PROJECTILE:
+        case ITEM_CLASS_RECIPE:
+        case ITEM_CLASS_MONEY:
+        case ITEM_CLASS_QUIVER:
+        case ITEM_CLASS_QUEST:
+        case ITEM_CLASS_KEY:
+        case ITEM_CLASS_GLYPH:
+            return false;
+        default:
+            break;
+    }
+
+    return true;
 }
 
 bool Manager::IsAutoDepositEnabled(Player* player) const
@@ -232,8 +257,16 @@ uint32 Manager::DepositAll(Player* player) const
 
     auto inspect = [&](uint8 bag, uint8 slot, Item* item)
     {
-        if (item && IsEligible(item->GetTemplate()))
-            candidates.push_back({ bag, slot, item->GetEntry(), item->GetCount() });
+        if (!item || !IsEligible(item->GetTemplate()))
+            return;
+
+        // Never auto-deposit an item the character currently needs for an active quest.
+        // A number of classic/WotLK items legitimately serve double duty as both quest
+        // objectives and crafting ingredients; quest usability wins while the quest is active.
+        if (player->HasQuestForItem(item->GetEntry()))
+            return;
+
+        candidates.push_back({ bag, slot, item->GetEntry(), item->GetCount() });
     };
 
     for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
@@ -251,7 +284,7 @@ uint32 Manager::DepositAll(Player* player) const
         // the operation safe if another script moved an item while handling removal hooks.
         Item* item = player->GetItemByPos(candidate.bag, candidate.slot);
         if (!item || item->GetEntry() != candidate.entry || item->GetCount() != candidate.count ||
-            !IsEligible(item->GetTemplate()))
+            !IsEligible(item->GetTemplate()) || player->HasQuestForItem(candidate.entry))
             continue;
 
         // DestroyItem(..., true) is important. With update=false an Item can remain marked
@@ -272,7 +305,10 @@ bool Manager::Withdraw(Player* player, uint32 itemEntry, uint32 amount) const
         return false;
 
     ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemEntry);
-    if (!IsEligible(proto) || GetStored(player, itemEntry) < amount)
+    // Existing storage may contain entries deposited by an older eligibility rule.  Never
+    // strand those items: eligibility controls future deposits, not the player's ability to
+    // withdraw something already credited to Reagent Storage.
+    if (!proto || GetStored(player, itemEntry) < amount)
         return false;
 
     ItemPosCountVec dest;
