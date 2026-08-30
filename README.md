@@ -1,59 +1,117 @@
-# mod-bank-reagents
+# mod-bank-reagents — beta1
 
-A server-only virtual crafting-reagent store for AzerothCore 3.3.5a, with optional remote crafting support when `BankReagentsUI` is installed on the client.
+AzerothCore WotLK module providing server-authoritative virtual reagent storage.
+
+## Companion Projects
+
+This project is part of a three-repository reagent-storage and inventory UI suite:
+
+- **mod-bank-reagents** — AzerothCore server module (this repository)
+- **BankReagentsUI** — WoW 3.3.5 client addon that integrates Reagent Storage with the profession window and enables addon-assisted remote crafting: https://github.com/Hisha/BankReagentsUI
+- **UnifiedBags335** — Standalone single-bag UI for WoW 3.3.5 with Bags, Bank, Reagent Storage, and Guild Bank support: https://github.com/Hisha/UnifiedBags335
+
+`mod-bank-reagents` works without either addon. Stock clients retain the banker gossip interface for Reagent Storage. The addons provide the enhanced graphical experience.
 
 ## Design goals
 
-- **No AzerothCore core modifications.**
-- Stock clients retain stock crafting behavior.
-- All clients can use banker gossip to enable/disable automatic reagent deposit and withdraw stored reagents.
-- Reagent eligibility uses WoW profession-bag family flags (herbs, mining, leatherworking, enchanting, engineering, gems, inscription).
-- With `BankReagentsUI`, the stock profession window displays `bags + Reagent Storage` counts and can request remote crafting.
-- The server remains authoritative for every remote craft.
+- **No AzerothCore core changes.**
+- Stock 3.3.5 clients remain usable.
+- Addons are optional.
+- Reagent quantities are stored in the characters database rather than hidden
+  client inventory slots.
+- Server validation remains authoritative for deposits, withdrawals and crafting.
 
-## Server behavior
+## Server-only functionality
 
-At a banker, the module adds:
+At a banker, a client without the addon can use the normal gossip fallback to:
 
-- `Enable auto reagent deposit` / `Disable auto reagent deposit`
-- `Reagent Storage`
+- enable/disable automatic reagent deposit;
+- browse Reagent Storage;
+- withdraw one, a stack, or all.
 
-When auto deposit is enabled, eligible reagents carried in normal inventory/bags are moved into virtual storage whenever the banker is opened.
+Deposit eligibility is built from actual trade-skill spell reagent lists and
+excludes non-reagent item classes. Items currently needed by an active quest are
+not auto-deposited.
+
+## Optional addon protocol
+
+`BankReagentsUI` uses the `BRG` addon-message protocol for:
+
+- HELLO/session detection;
+- paged storage synchronization;
+- banker-only graphical withdrawals;
+- auto-deposit preference changes;
+- addon-assisted remote profession crafting.
+
+Addon-originated withdrawals and auto-deposit changes are revalidated against
+the banker captured by the module's gossip hook with
+`GetNPCIfCanInteractWith(..., UNIT_NPC_FLAG_BANKER)`.
 
 ## Remote crafting
 
-Remote crafting is intentionally gated by the addon protocol. A stock client never arms the feature, so its crafting path is unchanged.
+When a recipe needs virtual reagents, the addon queues the known trade-skill spell
+with the server. The server starts the normal non-triggered spell cast. During
+spell checks, only the missing reagent amount is temporarily materialized into
+normal inventory. AzerothCore's normal spell flow then performs reagent
+consumption, craft effects, skillups and related handling.
 
-For an addon-authorized profession cast, the module:
-
-1. Calculates the missing eligible reagents.
-2. Verifies the player has enough in virtual storage.
-3. Uses AzerothCore's normal `CanStoreNewItem` calculation to ensure the missing amount can temporarily fit in normal bags/partial stacks.
-4. Debits virtual storage and temporarily materializes only the missing amount.
-5. Lets stock AzerothCore perform its normal reagent validation and `TakeReagents()`.
-6. On a successful cast, the temporary loan is committed; on cancellation/failure/logout/timeout it is rolled back.
-
-If the temporary amount cannot fit, the craft is stopped with a message explaining that additional bag space is required.
+If the cast fails or is canceled, borrowed reagent quantities are rolled back
+into Reagent Storage. If temporary reagents cannot fit in normal bags, the craft
+is rejected before stored quantities are lost.
 
 ## Database
 
-`data/sql/db-characters/base/001_mod_bank_reagents.sql` creates:
+The module uses:
 
 - `character_bank_reagent_settings`
 - `character_bank_reagents`
 
+Base SQL:
+`data/sql/db-characters/base/001_mod_bank_reagents.sql`
+
 ## Configuration
 
-Copy `conf/mod_bank_reagents.conf.dist` through the normal AzerothCore module configuration install process.
+Copy/merge:
+`conf/mod_bank_reagents.conf.dist`
 
-## Client addon
+Important options:
 
-Install the companion `BankReagentsUI` folder under:
+- `BankReagents.Enable`
+- `BankReagents.AutoDeposit.Enable`
+- `BankReagents.RemoteCraft.Enable`
+- `BankReagents.RemoteCraft.TransactionTimeoutSeconds`
 
-`World of Warcraft/Interface/AddOns/BankReagentsUI/`
+## Companion addons
 
-The addon is optional. Without it, Reagent Storage and banker auto-deposit still work, while crafting remains stock WoW.
+### BankReagentsUI
 
-## Status
+https://github.com/Hisha/BankReagentsUI
 
-This is the first module-only implementation targeted at the supplied AzerothCore/Playerbot game-source interfaces. Build and runtime testing on the user's full tree is still required.
+Profession-window integration, combined carried/stored reagent counts, remote crafting support, and the BRG client API.
+
+### UnifiedBags335
+
+https://github.com/Hisha/UnifiedBags335
+
+Standalone single-bag UI with separate Bags and Bank windows, graphical Reagent Storage, account inventory counts, and Guild Bank support.
+
+Neither addon requires changes to AzerothCore core.
+
+## Beta validation completed
+
+- Auto-deposit and manual withdrawal.
+- Quest-needed items remain in bags.
+- Mixed physical/virtual crafting.
+- Virtual-only crafting.
+- Canceled-craft rollback.
+- Create All / repeated crafting.
+- Full-bag remote-craft rejection.
+- Graphical Reagent Storage withdrawals.
+- Bank bag-slot purchase UI.
+- Guild-bank money deposit/withdraw permissions and item transfers.
+
+## Still worth broader testing
+
+- Additional professions and unusual recipes.
+- Item-target trade skills such as Enchanting.
+- Guild-bank behavior across more complex rank/tab permission combinations.

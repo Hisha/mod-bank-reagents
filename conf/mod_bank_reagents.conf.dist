@@ -1,7 +1,16 @@
 [worldserver]
 
+# Master switch.
 BankReagents.Enable = 1
+
+# Enables the banker auto-deposit feature.
 BankReagents.AutoDeposit.Enable = 1
+
+# Enables addon-assisted remote profession crafting.
 BankReagents.RemoteCraft.Enable = 1
+
+# Kept for compatibility with the earlier ARM/READY protocol path.
 BankReagents.RemoteCraft.AuthorizationSeconds = 5
+
+# Safety timeout for a temporary reagent-borrow transaction.
 BankReagents.RemoteCraft.TransactionTimeoutSeconds = 30
