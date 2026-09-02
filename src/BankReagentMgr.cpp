@@ -403,11 +403,18 @@ bool Manager::CanAddonWithdraw(Player* player) const
     if (!player)
         return false;
 
+    // First use the banker captured by the normal creature-gossip path.
     auto itr = g_bankerGuids.find(GuidLow(player));
-    if (itr == g_bankerGuids.end())
-        return false;
+    if (itr != g_bankerGuids.end() &&
+        player->GetNPCIfCanInteractWith(itr->second, UNIT_NPC_FLAG_BANKER))
+        return true;
 
-    return player->GetNPCIfCanInteractWith(itr->second, UNIT_NPC_FLAG_BANKER) != nullptr;
+    // Some stock bankers can open the bank without traversing the creature
+    // gossip hook above.  In that case the interacted NPC is still the player's
+    // current target, so validate it with AzerothCore's normal banker rules.
+    ObjectGuid target = player->GetTarget();
+    return !target.IsEmpty() &&
+        player->GetNPCIfCanInteractWith(target, UNIT_NPC_FLAG_BANKER) != nullptr;
 }
 
 bool Manager::HasAddonSession(Player* player) const
@@ -451,6 +458,22 @@ std::string Manager::HandleAddonRequest(Player* player, std::string const& reque
             out << row.itemEntry << ':' << row.quantity;
         }
         return out.str();
+    }
+
+    if (parts[0] == "BANKOPEN")
+    {
+        // BANKFRAME_OPENED is client-side evidence only; never trust it by itself.
+        // Revalidate the NPC the player actually interacted with before granting
+        // bank-only actions or running auto-deposit.
+        ObjectGuid target = player->GetTarget();
+        Creature* banker = target.IsEmpty() ? nullptr :
+            player->GetNPCIfCanInteractWith(target, UNIT_NPC_FLAG_BANKER);
+        if (!banker)
+            return "ERR|Unable to validate the banker for this bank session.";
+
+        NoteBanker(player, banker);
+        uint32 deposited = IsAutoDepositEnabled(player) ? DepositAll(player) : 0;
+        return "BANKOPEN|" + std::to_string(deposited);
     }
 
     if (parts[0] == "AUTO")

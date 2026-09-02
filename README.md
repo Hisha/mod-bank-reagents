@@ -110,6 +110,15 @@ Neither addon requires changes to AzerothCore core.
 - Bank bag-slot purchase UI.
 - Guild-bank money deposit/withdraw permissions and item transfers.
 
+## Development updates
+
+### 2026-09-02 — alternate banker session detection
+
+- Added addon-assisted `BANKFRAME_OPENED` session registration for stock bankers that open the bank without traversing the module's creature-gossip hook.
+- Server still authoritatively validates the currently interacted NPC with `GetNPCIfCanInteractWith(..., UNIT_NPC_FLAG_BANKER)` before enabling bank-only actions.
+- Auto-deposit now runs for these alternate banker paths as well.
+- Added a validated current-target fallback for graphical Reagent Storage withdrawals and auto-deposit preference changes.
+
 ## Still worth broader testing
 
 - Additional professions and unusual recipes.
